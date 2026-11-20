@@ -92,7 +92,212 @@ Why You Need It
 How to Check or Install
 • Check if you already have it: Open IntelliJ's terminal and run node -v. If it outputs v18.x.x or higher (such as Node 20 or 22 LTS), you are ready to go.
 • Install if missing: Download the LTS (Long Term Support) installer from nodejs.org or install via your package manager (brew install node on macOS, winget install OpenJS.NodeJS.LTS on Windows).
-Would you like to check which OS you're using so I can give you the exact command to install Node.js and verify npx works with IntelliJ?
+
+
+
+You can build a pure-Java Selenium MCP server using the official MCP Java SDK (io.modelcontextprotocol.sdk:mcp) and test it directly with JUnit 5—no Node.js required.
+1. Maven Dependencies (pom.xml)
+Add the official MCP Java SDK, Selenium Java, and JUnit 5 to your Maven project:
+
+xml
+<dependencies>
+    <!-- Official MCP Java SDK (includes STDIO transport & Jackson) -->
+    <dependency>
+        <groupId>io.modelcontextprotocol.sdk</groupId>
+        <artifactId>mcp</artifactId>
+        <version>2.2.0</version>
+    </dependency>
+
+    <!-- Selenium WebDriver -->
+    <dependency>
+        <groupId>org.seleniumhq.selenium</groupId>
+        <artifactId>selenium-java</artifactId>
+        <version>4.27.0</version>
+    </dependency>
+
+    <!-- JUnit 5 -->
+    <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter</artifactId>
+        <version>5.11.4</version>
+        <scope>test</scope>
+    </dependency>
+</dependencies>
+
+
+2. Build the Java Selenium MCP Server (SeleniumMcpServer.java)
+
+This server exposes Selenium browser actions (like open_url and get_title) over STDIO so GitHub Copilot in IntelliJ can launch and talk to it directly:
+java
+package com.example.mcp;
+
+import io.modelcontextprotocol.server.McpServer;
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.server.McpSyncServer;
+import io.modelcontextprotocol.server.transport.StdioServerTransportProvider;
+import io.modelcontextprotocol.spec.McpSchema.*;
+import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.chrome.ChromeDriver;
+import org.openqa.selenium.chrome.ChromeOptions;
+
+import java.util.List;
+import java.util.Map;
+
+public class SeleniumMcpServer {
+
+    private static WebDriver driver;
+
+    public static WebDriver getDriver() {
+        if (driver == null) {
+            ChromeOptions options = new ChromeOptions();
+            options.addArguments("--headless=new"); // Remove if you want to watch the browser
+            driver = new ChromeDriver(options);
+        }
+        return driver;
+    }
+
+    public static McpSyncServer createServer(StdioServerTransportProvider transport) {
+        McpSyncServer server = McpServer.sync(transport)
+                .serverInfo("java-selenium-mcp", "1.0.0")
+                .capabilities(ServerCapabilities.builder().tools(true).build())
+                .build();
+
+        // Tool 1: Navigate to URL
+        String openUrlSchema = """
+                {
+                  "type": "object",
+                  "properties": {
+                    "url": { "type": "string", "description": "Full URL to open" }
+                  },
+                  "required": ["url"]
+                }
+                """;
+
+        server.addTool(new McpServerFeatures.SyncToolSpecification(
+                new Tool("open_url", "Open a URL in Chrome via Selenium", openUrlSchema),
+                (exchange, args) -> {
+                    String url = (String) args.get("url");
+                    getDriver().get(url);
+                    return new CallToolResult(
+                            List.of(new TextContent("Navigated to: " + getDriver().getCurrentUrl())),
+                            false
+                    );
+                }
+        ));
+
+        // Tool 2: Get Page Title
+        String emptySchema = """
+                { "type": "object", "properties": {} }
+                """;
+
+        server.addTool(new McpServerFeatures.SyncToolSpecification(
+                new Tool("get_title", "Get the current page title", emptySchema),
+                (exchange, args) -> new CallToolResult(
+                        List.of(new TextContent(getDriver().getTitle())),
+                        false
+                )
+        ));
+
+        return server;
+    }
+
+    public static void main(String[] args) {
+        StdioServerTransportProvider transport = new StdioServerTransportProvider();
+        createServer(transport);
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            if (driver != null) driver.quit();
+        }));
+    }
+}
+Use code with caution.
+
+
+3. Test Your MCP Server with JUnit 5 (SeleniumMcpServerTest.java)
+
+You can test your MCP server end-to-end in JUnit 5 by wiring an McpSyncClient to your server process over STDIO, listing the registered tools, and calling them just like an AI agent would:
+java
+package com.example.mcp;
+
+import io.modelcontextprotocol.client.McpClient;
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.client.transport.ServerParameters;
+import io.modelcontextprotocol.client.transport.StdioClientTransport;
+import io.modelcontextprotocol.spec.McpSchema.*;
+import org.junit.jupiter.api.*;
+
+import java.time.Duration;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class SeleniumMcpServerTest {
+
+    private static McpSyncClient client;
+
+    @BeforeAll
+    static void startMcpServer() {
+        String javaBin = System.getProperty("java.home") + "/bin/java";
+        String classpath = System.getProperty("java.class.path");
+
+        ServerParameters params = ServerParameters.builder(javaBin)
+                .args("-cp", classpath, "com.example.mcp.SeleniumMcpServer")
+                .build();
+
+        client = McpClient.sync(new StdioClientTransport(params))
+                .requestTimeout(Duration.ofSeconds(30))
+                .build();
+        client.initialize();
+    }
+
+    @AfterAll
+    static void stopMcpServer() {
+        if (client != null) {
+            client.closeGracefully();
+        }
+    }
+
+    @Test
+    void shouldListSeleniumTools() {
+        ListToolsResult toolsResult = client.listTools();
+        assertTrue(toolsResult.tools().stream().anyMatch(t -> t.name().equals("open_url")));
+        assertTrue(toolsResult.tools().stream().anyMatch(t -> t.name().equals("get_title")));
+    }
+
+    @Test
+    void shouldNavigateAndReadPageTitle() {
+        CallToolResult navResult = client.callTool(
+                new CallToolRequest("open_url", Map.of("url", "https://example.com"))
+        );
+        assertFalse(navResult.isError());
+
+        CallToolResult titleResult = client.callTool(
+                new CallToolRequest("get_title", Map.of())
+        );
+        TextContent content = (TextContent) titleResult.content().get(0);
+        assertEquals("Example Domain", content.text());
+    }
+}
+Use code with caution.
+
+4. Connect Your Java MCP Server to GitHub Copilot in IntelliJ
+
+1. Package your project into a runnable JAR (e.g., mvn clean package using maven-shade-plugin so all dependencies are bundled).
+2. In IntelliJ, open Settings → Tools → AI Assistant → Model Context Protocol (or your Copilot mcp.json) and register your JAR:json
+{
+  "mcpServers": {
+    "java-selenium": {
+      "command": "java",
+      "args": ["-jar", "/absolute/path/to/your-selenium-mcp-server.jar"]
+    }
+  }
+}
+Use code with caution.
+3. Important Caveat: Never write debug System.out.println(...) statements in your MCP server code—STDIO transport uses standard output exclusively for JSON-RPC messages, so stray console prints will break the connection. Always log to System.err or an SLF4J file appender.
+
+Would you like me to share:
+• Additional Selenium tool handlers (such as click_element, type_text, and get_dom_snapshot)?
+• The maven-shade-plugin snippet for pom.xml so you can build the runnable JAR for IntelliJ?
+• Would you like to check which OS you're using so I can give you the exact command to install Node.js and verify npx works with IntelliJ?
 
 
 
